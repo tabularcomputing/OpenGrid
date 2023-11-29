@@ -6,8 +6,7 @@ import sys
 import threading
 import subprocess
 import requests
-import dask
-import dask.dataframe as dd
+import random
 
 def get_cpu_usage():
     return psutil.cpu_percent(interval=1)
@@ -16,24 +15,32 @@ def send_data_to_node(data, node_host, node_port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((node_host, node_port))
         s.sendall(data)
+        response = s.recv(4096)
+    return pickle.loads(response)
 
 def process_data(data_chunk):
-    ddf = dd.from_pandas(data_chunk, npartitions=1)
-    processed = ddf.map_partitions(lambda df: df.apply(lambda x: x * 2))
-    return processed.compute()
+    sorted_chunk = sorted(data_chunk)
+    return sorted_chunk
 
 def handle_connection(conn):
     while True:
-        data = conn.recv(1024)
+        data = b''
+        while True:
+            packet = conn.recv(4096)
+            if not packet:
+                break
+            data += packet
         if not data:
             break
-        received_data = pickle.loads(data)
-        if 'data_chunk' in received_data:
-            result = process_data(received_data['data_chunk'])
-            conn.send(pickle.dumps(result))
-        else:
-            print(f"Received: {received_data}")
+        try:
+            received_data = pickle.loads(data)
+            processed_data = process_data(received_data)
+            conn.send(pickle.dumps(processed_data))
+        except Exception as e:
+            print(f"Error processing data: {e}")
+            break
     conn.close()
+
 
 def start_server(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -59,6 +66,11 @@ def start_ngrok(port):
         print(f"Failed to get ngrok tunnel URL: {e}")
         sys.exit(1)
 
+def check_accuracy(original, part1, part2):
+    combined = part1 + part2
+    combined.sort()
+    return combined == original
+
 def main(interval=3):
     port = 65432
     try:
@@ -69,6 +81,12 @@ def main(interval=3):
 
     start_ngrok(port)
     
+    # Generate dataset
+    dataset = [random.randint(1, 999) for _ in range(1000)]
+    half = len(dataset) // 2
+    data_chunk_1 = dataset[:half]
+    data_chunk_2 = dataset[half:]
+
     while True:
         try:
             target_percentage = float(input("Enter target CPU usage percentage: "))
@@ -79,9 +97,16 @@ def main(interval=3):
                 raise ValueError("Port must be a number")
             ngrok_port = int(ngrok_port_str)
 
-            cpu_usage = get_cpu_usage()
-            data = pickle.dumps({'cpu_usage': cpu_usage, 'target': target_percentage, 'rebalance': rebalance_percentage})
-            send_data_to_node(data, ngrok_host, ngrok_port)
+            # Send and receive processed data
+            processed_chunk_1 = send_data_to_node(pickle.dumps(data_chunk_1), ngrok_host, ngrok_port)
+            processed_chunk_2 = process_data(data_chunk_2)
+
+            # Check result accuracy
+            if check_accuracy(dataset, processed_chunk_1, processed_chunk_2):
+                print("Data processed correctly.")
+            else:
+                print("Data processing error.")
+
             time.sleep(interval)
         except ValueError as e:
             print(f"Invalid input: {e}")
